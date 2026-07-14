@@ -146,6 +146,21 @@
   --panel-w-min: 280px;     /* at 1280×800 */
   --panel-w-max: 360px;     /* at 2560×1440 */
 
+  /* iPhone safe-area insets — 0 on desktop, real on notched devices.
+     Every fixed edge of the mobile chrome reserves these so nothing hides
+     behind the notch / Dynamic Island / home indicator (viewport-fit=cover). */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* Mobile (téléphone) chrome dimensions — thumb-reach layout.
+     --topbar-h: slim command bar · --dock-h: bottom tool dock content height
+     · --hit-touch: Apple HIG minimum comfortable target (44px). */
+  --topbar-h: 48px;
+  --dock-h: 60px;
+  --hit-touch: 44px;
+
   /* Motion — fast, purposeful, zero decoration */
   --motion-fast: 120ms; /* @kind other */ /* hover/press, tool switch */
   --motion-base: 160ms; /* @kind other */ /* toggles, segmented thumb */
@@ -164,8 +179,10 @@
 
 html, body { margin: 0; height: 100%; overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
 body { font-family: var(--font-ui), sans-serif; background: var(--surface-status); overflow: hidden; }
-#root { height: 100vh; height: 100dvh; padding-bottom: env(safe-area-inset-bottom); box-sizing: border-box; background: var(--surface-status); }
-button { font-family: var(--font-ui), sans-serif; }
+/* Safe-area insets owned by the mobile chrome (top bar / tool dock), not #root. */
+#root { height: 100vh; height: 100dvh; box-sizing: border-box; background: var(--surface-status); }
+* { -webkit-tap-highlight-color: transparent; }
+button, [role="radio"], [role="menuitem"] { font-family: var(--font-ui), sans-serif; touch-action: manipulation; }
 noscript div { color: #F0F3F5; font: 14px/1.5 sans-serif; padding: 40px; }</style>
 <script>
 window.addEventListener("error", function (ev) {
@@ -2339,10 +2356,30 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
   "use strict";
 
   var EIGHTH = 1 / 8;
+  var CM_PER_IN = 2.54;
 
   // Unicode vulgar fractions for eighths — never "5/8" (readme content rules).
   var FRACTIONS = { 1: "⅛", 2: "¼", 3: "⅜", 4: "½", 5: "⅝", 6: "¾", 7: "⅞" };
   // ⅛ ¼ ⅜ ½ ⅝ ¾ ⅞
+
+  /* ── Unit system (display only) ─────────────────────────────────────────
+     Internal math stays decimal inches everywhere; this only changes how a
+     length is *rendered / parsed*. Three systems the operator toggles:
+       "po"    — pouces, ⅛" fractions          → "34 ⅝ po"   (default, §7)
+       "pi-po" — pieds + pouces                 → "2 pi 10 ⅝ po"
+       "cm"    — métrique, résolution mm        → "87,9 cm"
+     Angles are unit-agnostic (formatDegrees unchanged). */
+  var UNIT = "po";
+  var UNIT_SYSTEMS = [
+    { id: "po", label: "po", name: "Pouces" },
+    { id: "pi-po", label: "pi·po", name: "Pieds + pouces" },
+    { id: "cm", label: "cm", name: "Métrique" },
+  ];
+  function setUnitSystem(u) { if (u === "po" || u === "pi-po" || u === "cm") UNIT = u; return UNIT; }
+  function getUnitSystem() { return UNIT; }
+  /* Trailing unit token shown by the Readout component's dim suffix. Empty in
+     pi-po because the feet+inches value already carries its own « pi »/« po ». */
+  function unitLabel() { return UNIT === "cm" ? "cm" : UNIT === "pi-po" ? "" : "po"; }
 
   /* Round a decimal-inch value to the nearest ⅛" (resolution floor, §7).
      Half-eighths round away from zero so 1/16 → ⅛, never « 1/16 ». */
@@ -2351,11 +2388,9 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
     return sign * Math.round(Math.abs(v) / EIGHTH) * EIGHTH;
   }
 
-  /* 34.625 → "34 ⅝" · 0.125 → "⅛" · 12 → "12" · 0.0625 → "⅛" · -3.5 → "-3 ½"
-     Value only — the unit ("po") is rendered by the Readout component or
-     appended by formatInchesUnit. */
-  function formatInches(v) {
-    if (!isFinite(v)) return "—"; // — em dash for “no value”
+  /* Eighth-inch value → "34 ⅝" / "⅝" / "12" (no unit). The unrounded core
+     shared by every system's inch part. */
+  function inchesFrac(v) {
     var r = roundToEighth(v);
     var sign = r < 0 ? "-" : "";
     r = Math.abs(r);
@@ -2367,9 +2402,41 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
     return sign + whole + " " + FRACTIONS[eighths];
   }
 
-  /* "34 ⅝ po" — space before unit per content rules. */
+  /* Pieds + pouces, self-contained units: "2 pi 10 ⅝ po" · "2 pi" · "10 ⅝ po". */
+  function feetInches(v) {
+    var r = roundToEighth(v);
+    var sign = r < 0 ? "-" : "";
+    r = Math.abs(r);
+    var feet = Math.floor(r / 12 + 1e-9);
+    var rem = r - feet * 12;
+    var inchPart = inchesFrac(rem);
+    if (feet === 0) return sign + inchPart + " po";
+    if (rem < EIGHTH / 2) return sign + feet + " pi";
+    return sign + feet + " pi " + inchPart + " po";
+  }
+
+  /* Métrique — cm at mm resolution, French decimal comma: "87,9". */
+  function metric(v) {
+    var cm = Math.round(v * CM_PER_IN * 10) / 10;
+    var sign = cm < 0 ? "-" : "";
+    return sign + Math.abs(cm).toFixed(1).replace(".", ",");
+  }
+
+  /* Value only (unit rendered by Readout or appended by formatInchesUnit).
+     In pi-po the value is self-contained — its unit suffix is "" (unitLabel). */
+  function formatInches(v) {
+    if (!isFinite(v)) return "—"; // — em dash for “no value”
+    if (UNIT === "cm") return metric(v);
+    if (UNIT === "pi-po") return feetInches(v);
+    return inchesFrac(v);
+  }
+
+  /* Full measurement with unit(s): "34 ⅝ po" / "2 pi 10 ⅝ po" / "87,9 cm". */
   function formatInchesUnit(v) {
-    return formatInches(v) + " po";
+    if (!isFinite(v)) return "—";
+    if (UNIT === "cm") return metric(v) + " cm";
+    if (UNIT === "pi-po") return feetInches(v);
+    return inchesFrac(v) + " po";
   }
 
   /* Angles: French decimal comma, ° glued (22,5°); resolution 0,5°. */
@@ -2380,15 +2447,10 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
     return s + "°";
   }
 
-  /* Parse operator input from NumberFields into decimal inches.
-     Accepts: "34 ⅝", "34 5/8", "34,625", "34.625", "⅝", "5/8", "-3 ½".
-     Returns NaN when unparseable (caller keeps the previous value). */
-  function parseInches(text) {
-    if (typeof text !== "string") return NaN;
-    var s = text.trim()
-      .replace(/po\s*$/i, "")
-      .replace(/−/g, "-") // typographic minus
-      .trim();
+  /* Parse a plain inch expression (no unit token): "34 ⅝", "34 5/8",
+     "34,625", "⅝", "5/8", "-3 ½". NaN if unparseable. */
+  function parseInchOnly(s) {
+    s = s.trim();
     if (s === "") return NaN;
     var sign = 1;
     if (s[0] === "-") { sign = -1; s = s.slice(1).trim(); }
@@ -2411,6 +2473,43 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
     return NaN;
   }
 
+  /* Parse operator input from NumberFields into decimal inches, unit-aware.
+     Explicit units always win (cm/mm, pi/'/′, po/"); a bare number follows
+     the active unit system (cm mode reads bare numbers as centimetres).
+     Returns NaN when unparseable (caller keeps the previous value). */
+  function parseInches(text) {
+    if (typeof text !== "string") return NaN;
+    var s = text.trim().replace(/−/g, "-").trim(); // typographic minus
+    if (s === "") return NaN;
+    var low = s.toLowerCase();
+
+    // Explicit metric
+    var mm = low.match(/^(-?\d+(?:[.,]\d+)?)\s*mm$/);
+    if (mm) return Number(mm[1].replace(",", ".")) / 25.4;
+    var cm = low.match(/^(-?\d+(?:[.,]\d+)?)\s*cm$/);
+    if (cm) return Number(cm[1].replace(",", ".")) / CM_PER_IN;
+
+    // Explicit feet (+ optional inch part): "2 pi 10 ⅝", "2' 10 1/2", "3 pi"
+    var fm = s.match(/^(-?\d+)\s*(?:pi|'|′)\s*(.*)$/i);
+    if (fm) {
+      var feet = parseInt(fm[1], 10);
+      var rest = (fm[2] || "").replace(/(?:po|")\s*$/i, "").trim();
+      var inch = rest ? parseInchOnly(rest) : 0;
+      if (isNaN(inch)) return NaN;
+      return (feet < 0 ? -1 : 1) * (Math.abs(feet) * 12 + inch);
+    }
+
+    // Explicit inch token (po / ") always means inches; strip it and parse.
+    // Only a bare number in cm mode is read as centimetres.
+    var hasInchTok = /(?:po|")\s*$/i.test(s);
+    s = s.replace(/(?:po|")\s*$/i, "").trim();
+    if (!hasInchTok && UNIT === "cm") {
+      var d = s.match(/^(-?\d+(?:[.,]\d+)?)$/);
+      if (d) return Number(d[1].replace(",", ".")) / CM_PER_IN;
+    }
+    return parseInchOnly(s);
+  }
+
   /* Parse degrees: "22,5" / "22.5" / "45°" → decimal degrees, NaN if invalid. */
   function parseDegrees(text) {
     if (typeof text !== "string") return NaN;
@@ -2427,6 +2526,11 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
     formatDegrees: formatDegrees,
     parseInches: parseInches,
     parseDegrees: parseDegrees,
+    // Unit system (display only — internal math stays inches)
+    UNIT_SYSTEMS: UNIT_SYSTEMS,
+    setUnitSystem: setUnitSystem,
+    getUnitSystem: getUnitSystem,
+    unitLabel: unitLabel,
   };
 
   global.VZEngine = global.VZEngine || {};
@@ -3874,6 +3978,222 @@ function VzCalcToggle({
     }
   }) : null);
 }
+
+/* Mobile overflow menu — the secondary chrome (Effacer, Grille, Aimant,
+   Calculatrice, Ajuster la vue) folded off the slim top bar into one sheet so
+   the bar stays thumb-clean. Toggles show a check; destructive stays red. */
+function VzOverflowMenu({
+  open,
+  onClose,
+  grid,
+  setGrid,
+  snap,
+  setSnap,
+  calcOpen,
+  onToggleCalc,
+  onZoomFit,
+  onClearAll,
+  unit,
+  setUnit
+}) {
+  const {
+    Icon,
+    SegmentedControl
+  } = window.VoltZaBendSimDesignSystem_80ea46;
+  if (!open) return null;
+  const unitOpts = window.VZEngine.format.UNIT_SYSTEMS.map(u => ({
+    value: u.id,
+    label: u.label
+  }));
+  const Row = ({
+    icon,
+    label,
+    on,
+    danger,
+    onClick
+  }) => /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    role: "menuitem",
+    onClick: () => {
+      onClick();
+      onClose();
+    },
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      width: "100%",
+      minHeight: "var(--hit-touch)",
+      padding: "0 12px",
+      font: "var(--text-body)",
+      color: danger ? "var(--danger)" : "var(--text-1)",
+      background: "transparent",
+      border: "none",
+      borderRadius: "var(--radius-2)",
+      cursor: "pointer",
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement(Icon, {
+    name: icon,
+    size: 18
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, label), on ? /*#__PURE__*/React.createElement(Icon, {
+    name: "check",
+    size: 16,
+    style: {
+      color: "var(--accent)"
+    }
+  }) : null);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 55,
+      background: "transparent"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    role: "menu",
+    "aria-label": "Plus d'actions",
+    style: {
+      position: "fixed",
+      top: "calc(var(--safe-top) + var(--topbar-h) + 4px)",
+      right: "calc(var(--safe-right) + 8px)",
+      minWidth: 220,
+      zIndex: 56,
+      background: "var(--surface-overlay)",
+      border: "1px solid var(--border-strong)",
+      borderRadius: "var(--radius-3)",
+      boxShadow: "var(--shadow-2)",
+      padding: 6,
+      display: "flex",
+      flexDirection: "column",
+      gap: 2
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      padding: "6px 10px 8px"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      font: "var(--text-label-sm)",
+      letterSpacing: "var(--tracking-label)",
+      textTransform: "uppercase",
+      color: "var(--text-2)"
+    }
+  }, "Unit\xE9s"), /*#__PURE__*/React.createElement(SegmentedControl, {
+    ariaLabel: "Unit\xE9s",
+    value: unit,
+    onChange: setUnit,
+    options: unitOpts
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      height: 1,
+      background: "var(--border-subtle)",
+      margin: "0 6px 4px"
+    }
+  }), /*#__PURE__*/React.createElement(Row, {
+    icon: "grille",
+    label: "Grille",
+    on: grid,
+    onClick: () => setGrid(!grid)
+  }), /*#__PURE__*/React.createElement(Row, {
+    icon: "aimant",
+    label: "Aimant",
+    on: snap,
+    onClick: () => setSnap(!snap)
+  }), /*#__PURE__*/React.createElement(Row, {
+    icon: "zoomFit",
+    label: "Ajuster \xE0 la vue",
+    onClick: onZoomFit
+  }), /*#__PURE__*/React.createElement(VzCalcMenuRow, {
+    calcOpen: calcOpen,
+    onToggleCalc: onToggleCalc,
+    onClose: onClose
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      height: 1,
+      background: "var(--border-subtle)",
+      margin: "4px 6px"
+    }
+  }), /*#__PURE__*/React.createElement(Row, {
+    icon: "rebut",
+    label: "Effacer tout",
+    danger: true,
+    onClick: onClearAll
+  })));
+}
+
+/* Calculatrice row for the overflow menu (own SVG — no calc glyph in the set). */
+function VzCalcMenuRow({
+  calcOpen,
+  onToggleCalc,
+  onClose
+}) {
+  const {
+    Icon
+  } = window.VoltZaBendSimDesignSystem_80ea46;
+  return /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    role: "menuitem",
+    onClick: () => {
+      onToggleCalc();
+      onClose();
+    },
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      width: "100%",
+      minHeight: "var(--hit-touch)",
+      padding: "0 12px",
+      font: "var(--text-body)",
+      color: "var(--text-1)",
+      background: "transparent",
+      border: "none",
+      borderRadius: "var(--radius-2)",
+      cursor: "pointer",
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: "18",
+    height: "18",
+    viewBox: "0 0 24 24",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    fill: "none",
+    "aria-hidden": "true"
+  }, /*#__PURE__*/React.createElement("rect", {
+    x: "5.5",
+    y: "3",
+    width: "13",
+    height: "18",
+    rx: "2"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M8.5 6.5h7"
+  }), /*#__PURE__*/React.createElement("path", {
+    d: "M8.5 11h.01M12 11h.01M15.5 11h.01M8.5 14.5h.01M12 14.5h.01M15.5 14.5h.01M8.5 18h.01M12 18h.01M15.5 18h.01"
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1
+    }
+  }, "Calculatrice"), calcOpen ? /*#__PURE__*/React.createElement(Icon, {
+    name: "check",
+    size: 16,
+    style: {
+      color: "var(--accent)"
+    }
+  }) : null);
+}
 function VzToolbar({
   mode,
   setMode,
@@ -3893,6 +4213,8 @@ function VzToolbar({
   onNewConduit,
   calcOpen,
   onToggleCalc,
+  unit,
+  setUnit,
   compact
 }) {
   const {
@@ -3902,6 +4224,144 @@ function VzToolbar({
     Icon
   } = window.VoltZaBendSimDesignSystem_80ea46;
   const [flyout, setFlyout] = React.useState(false);
+  const [overflow, setOverflow] = React.useState(false);
+  const unitOpts = window.VZEngine.format.UNIT_SYSTEMS.map(u => ({
+    value: u.id,
+    label: u.label
+  }));
+
+  /* ── Mobile command bar (téléphone) ──────────────────────────────────
+     Slim, notch-safe, thumb-clean: wordmark · Mode · Nouveau (+ tailles) ·
+     ⋯ overflow. Secondary chrome moves into the overflow sheet; zoom/undo
+     become floating canvas controls (rendered by app). */
+  if (compact) {
+    return /*#__PURE__*/React.createElement("header", {
+      style: {
+        height: "calc(var(--topbar-h) + var(--safe-top))",
+        paddingTop: "var(--safe-top)",
+        paddingLeft: "calc(var(--safe-left) + 10px)",
+        paddingRight: "calc(var(--safe-right) + 8px)",
+        background: "var(--surface-toolbar)",
+        borderBottom: "1px solid var(--border-subtle)",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        position: "relative",
+        zIndex: 20,
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        font: "700 17px/1 var(--font-ui)",
+        color: "var(--text-1)",
+        flexShrink: 0
+      }
+    }, "VoltZa"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        display: "flex",
+        justifyContent: "center"
+      }
+    }, /*#__PURE__*/React.createElement(SegmentedControl, {
+      ariaLabel: "Mode",
+      value: mode,
+      onChange: setMode,
+      options: [{
+        value: "libre",
+        label: "Libre"
+      }, {
+        value: "defis",
+        label: "Défis"
+      }, {
+        value: "score",
+        label: "Score"
+      }]
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: "relative",
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement(Button, {
+      variant: "primary",
+      icon: "plus",
+      onClick: () => {
+        setFlyout(!flyout);
+        setOverflow(false);
+      },
+      "aria-label": "Nouveau conduit"
+    }), flyout ? /*#__PURE__*/React.createElement("div", {
+      role: "menu",
+      style: {
+        position: "fixed",
+        top: "calc(var(--safe-top) + var(--topbar-h) + 4px)",
+        right: "calc(var(--safe-right) + 8px)",
+        minWidth: 180,
+        background: "var(--surface-overlay)",
+        border: "1px solid var(--border-strong)",
+        borderRadius: "var(--radius-3)",
+        boxShadow: "var(--shadow-2)",
+        padding: 6,
+        zIndex: 56
+      }
+    }, [["1/2", "EMT ½ po"], ["3/4", "EMT ¾ po"], ["1", "EMT 1 po"]].map(([key, label], i) => /*#__PURE__*/React.createElement("button", {
+      key: key,
+      type: "button",
+      role: "menuitem",
+      onClick: () => {
+        setFlyout(false);
+        onNewConduit(key);
+      },
+      style: {
+        display: "flex",
+        width: "100%",
+        alignItems: "center",
+        justifyContent: "space-between",
+        minHeight: "var(--hit-touch)",
+        padding: "0 12px",
+        font: "var(--text-body)",
+        color: "var(--text-1)",
+        background: "transparent",
+        border: "none",
+        borderRadius: "var(--radius-2)",
+        cursor: "pointer",
+        fontVariantNumeric: "tabular-nums"
+      }
+    }, label, i === 1 ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        font: "var(--text-micro)",
+        color: "var(--text-2)"
+      }
+    }, "d\xE9faut") : null))) : null), /*#__PURE__*/React.createElement(IconButton, {
+      icon: "menu",
+      label: "Plus d'actions",
+      pressed: overflow,
+      onClick: () => {
+        setOverflow(o => !o);
+        setFlyout(false);
+      }
+    }), flyout ? /*#__PURE__*/React.createElement("div", {
+      onClick: () => setFlyout(false),
+      style: {
+        position: "fixed",
+        inset: 0,
+        zIndex: 55
+      }
+    }) : null, /*#__PURE__*/React.createElement(VzOverflowMenu, {
+      open: overflow,
+      onClose: () => setOverflow(false),
+      grid: grid,
+      setGrid: setGrid,
+      snap: snap,
+      setSnap: setSnap,
+      calcOpen: calcOpen,
+      onToggleCalc: onToggleCalc,
+      onZoomFit: onZoomFit,
+      onClearAll: onClearAll,
+      unit: unit,
+      setUnit: setUnit
+    }));
+  }
   return /*#__PURE__*/React.createElement("header", {
     style: {
       height: "var(--toolbar-h)",
@@ -4000,7 +4460,7 @@ function VzToolbar({
     style: {
       flexShrink: 0
     }
-  }, "Effacer tout"), /*#__PURE__*/React.createElement("span", {
+  }, compact ? "Effacer" : "Effacer tout"), /*#__PURE__*/React.createElement("span", {
     style: {
       width: 1,
       height: 24,
@@ -4083,6 +4543,25 @@ function VzToolbar({
   }), /*#__PURE__*/React.createElement(VzCalcToggle, {
     pressed: calcOpen,
     onClick: onToggleCalc
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 1,
+      height: 24,
+      background: "var(--border-subtle)",
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      flexShrink: 0
+    },
+    title: "Unit\xE9s de mesure"
+  }, /*#__PURE__*/React.createElement(SegmentedControl, {
+    ariaLabel: "Unit\xE9s de mesure",
+    value: unit,
+    onChange: setUnit,
+    options: unitOpts
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       marginLeft: "auto",
@@ -4242,6 +4721,201 @@ function VzToolPalette({
   }));
 }
 window.VzToolPalette = VzToolPalette;
+
+/* ── Bottom tool dock (téléphone) ────────────────────────────────────────
+   The left rail relocated to the thumb zone: a horizontal, notch-safe dock
+   of the same seven tools + Rebut. Same tool ids, same setTool, same
+   obstacle-shape chooser — layout only, engine untouched. Active tool gets
+   the accent glyph + a top accent tick; Rebut disables without a selection. */
+function VzToolDock({
+  tool,
+  setTool,
+  rebutEnabled,
+  onRebut,
+  obstacleKind,
+  setObstacleKind
+}) {
+  const {
+    Icon
+  } = window.VoltZaBendSimDesignSystem_80ea46;
+  const [shapes, setShapes] = React.useState(false);
+  const tools = [["select", "Sélection", "select"], ["ruban", "Ruban", "ruban"], ["marqueur", "Marqueur", "marqueur"], ["coupe", "Coupe", "coupe"], ["cintreuse", "Cintreuse", "cintreuse"], ["niveau", "Niveau", "niveau"], ["obstacle", "Obstacles", "obstacle"]];
+  const shapeDefs = [["cercle", "Cercle", /*#__PURE__*/React.createElement("circle", {
+    key: "c",
+    cx: "12",
+    cy: "12",
+    r: "7.5"
+  })], ["rect", "Rectangle", /*#__PURE__*/React.createElement("rect", {
+    key: "r",
+    x: "5",
+    y: "5",
+    width: "14",
+    height: "14",
+    rx: "0.5"
+  })], ["tri", "Triangle", /*#__PURE__*/React.createElement("path", {
+    key: "t",
+    d: "M12 4.5l8 15H4z"
+  })]];
+  const Cell = ({
+    id,
+    label,
+    icon,
+    active,
+    danger,
+    disabled,
+    onClick
+  }) => /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    "aria-label": label,
+    "aria-pressed": active,
+    disabled: disabled,
+    onClick: onClick,
+    style: {
+      position: "relative",
+      flex: "0 0 auto",
+      display: "inline-flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 3,
+      minWidth: 58,
+      height: "var(--dock-h)",
+      padding: "0 6px",
+      background: "transparent",
+      border: "none",
+      cursor: disabled ? "default" : "pointer",
+      color: disabled ? "var(--text-3)" : danger ? "var(--danger)" : active ? "var(--accent)" : "var(--text-2)",
+      opacity: disabled ? 0.4 : 1,
+      WebkitTapHighlightColor: "transparent",
+      touchAction: "manipulation"
+    }
+  }, active ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: "absolute",
+      top: 0,
+      left: 12,
+      right: 12,
+      height: 2,
+      background: "var(--accent)",
+      borderRadius: 1
+    }
+  }) : null, /*#__PURE__*/React.createElement(Icon, {
+    name: icon,
+    size: 22
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      font: "600 10px/1 var(--font-ui)",
+      letterSpacing: "0.01em",
+      whiteSpace: "nowrap"
+    }
+  }, label));
+  return /*#__PURE__*/React.createElement("nav", {
+    "aria-label": "Outils",
+    style: {
+      flexShrink: 0,
+      position: "relative",
+      background: "var(--surface-toolbar)",
+      borderTop: "1px solid var(--border-subtle)",
+      paddingBottom: "var(--safe-bottom)",
+      paddingLeft: "var(--safe-left)",
+      paddingRight: "var(--safe-right)",
+      zIndex: 20
+    }
+  }, tool === "obstacle" && shapes ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShapes(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 55
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    role: "menu",
+    "aria-label": "Forme d'obstacle",
+    style: {
+      position: "absolute",
+      bottom: "calc(var(--dock-h) + var(--safe-bottom) + 6px)",
+      right: "calc(var(--safe-right) + 8px)",
+      zIndex: 56,
+      background: "var(--surface-overlay)",
+      border: "1px solid var(--border-strong)",
+      borderRadius: "var(--radius-3)",
+      boxShadow: "var(--shadow-2)",
+      padding: 6,
+      display: "flex",
+      flexDirection: "column",
+      gap: 2,
+      minWidth: 160
+    }
+  }, shapeDefs.map(([key, label, glyph]) => /*#__PURE__*/React.createElement("button", {
+    key: key,
+    type: "button",
+    role: "menuitemradio",
+    "aria-checked": obstacleKind === key,
+    onClick: () => {
+      setObstacleKind(key);
+      setShapes(false);
+    },
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      minHeight: "var(--hit-touch)",
+      padding: "0 12px",
+      font: "var(--text-body)",
+      color: obstacleKind === key ? "var(--accent)" : "var(--text-1)",
+      background: obstacleKind === key ? "var(--accent-dim)" : "transparent",
+      border: "none",
+      borderRadius: "var(--radius-2)",
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("svg", {
+    width: "18",
+    height: "18",
+    viewBox: "0 0 24 24",
+    stroke: "currentColor",
+    strokeWidth: "1.5",
+    fill: "none",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": "true"
+  }, glyph), label)))) : null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "stretch",
+      justifyContent: "space-between",
+      overflowX: "auto",
+      overflowY: "hidden",
+      WebkitOverflowScrolling: "touch",
+      scrollbarWidth: "none"
+    }
+  }, tools.map(([id, label, icon]) => /*#__PURE__*/React.createElement(Cell, {
+    key: id,
+    id: id,
+    label: label,
+    icon: icon,
+    active: tool === id,
+    onClick: () => {
+      if (id === "obstacle") setShapes(tool === "obstacle" ? s => !s : true);else setShapes(false);
+      setTool(id);
+    }
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 1,
+      alignSelf: "center",
+      height: 30,
+      background: "var(--border-subtle)",
+      flexShrink: 0
+    }
+  }), /*#__PURE__*/React.createElement(Cell, {
+    id: "rebut",
+    label: "Rebut",
+    icon: "rebut",
+    danger: true,
+    disabled: !rebutEnabled,
+    onClick: onRebut
+  })));
+}
+window.VzToolDock = VzToolDock;
 })();
 
 /* ui_kits/bendsim/CanvasScene.jsx */
@@ -5663,8 +6337,11 @@ function VzContextPanel({
   } = window.VoltZaBendSimDesignSystem_80ea46;
   const doc = api.doc;
   const F = EP.format;
+
+  // compact (feuille du bas) : sections resserrées pour que l'essentiel
+  // tienne à l'écran ; le bureau garde l'aération d'origine
   const section = {
-    padding: "14px 16px",
+    padding: api.compact ? "10px 14px" : "14px 16px",
     borderBottom: "1px solid var(--border-subtle)"
   };
   const h = t => /*#__PURE__*/React.createElement("div", {
@@ -5673,7 +6350,7 @@ function VzContextPanel({
       letterSpacing: "var(--tracking-label)",
       textTransform: "uppercase",
       color: "var(--text-2)",
-      marginBottom: 10
+      marginBottom: api.compact ? 7 : 10
     }
   }, t);
   const title = t => /*#__PURE__*/React.createElement("div", {
@@ -5757,13 +6434,13 @@ function VzContextPanel({
     }, /*#__PURE__*/React.createElement(Readout, {
       label: "Extr\xE9mit\xE9 G",
       value: F.formatInches(b.s),
-      unit: "po",
+      unit: F.unitLabel(),
       size: "xl",
       tone: "accent"
     }), /*#__PURE__*/React.createElement(Readout, {
       label: "Extr\xE9mit\xE9 D",
       value: F.formatInches(c.length - b.s),
-      unit: "po",
+      unit: F.unitLabel(),
       size: "xl"
     }))), /*#__PURE__*/React.createElement("div", {
       style: section
@@ -5883,7 +6560,16 @@ function VzContextPanel({
       name: "warning",
       size: 14
     })), errText) : null, /*#__PURE__*/React.createElement("div", {
-      style: {
+      style: api.compact ? {
+        // PLIER reste visible pendant que la feuille défile (l'action
+        // primaire ne doit jamais être sous le pli)
+        padding: 12,
+        position: "sticky",
+        bottom: 0,
+        marginTop: "auto",
+        background: "var(--surface-panel)",
+        borderTop: "1px solid var(--border-subtle)"
+      } : {
         padding: 16
       }
     }, /*#__PURE__*/React.createElement(Button, {
@@ -5925,12 +6611,12 @@ function VzContextPanel({
       }), /*#__PURE__*/React.createElement(Readout, {
         label: "Longueur totale",
         value: F.formatInches(sd.envelopeLength),
-        unit: "po",
+        unit: F.unitLabel(),
         size: "lg"
       }), /*#__PURE__*/React.createElement(Readout, {
         label: "D\xE9velopp\xE9e",
         value: F.formatInches(sd.developedLength),
-        unit: "po",
+        unit: F.unitLabel(),
         size: "lg"
       }))), /*#__PURE__*/React.createElement("div", {
         style: {
@@ -6000,8 +6686,8 @@ function VzContextPanel({
       const inField = (label, key, width) => /*#__PURE__*/React.createElement(LiveField, {
         key: key,
         label: label,
-        unit: "po",
-        width: width || 104,
+        unit: F.unitLabel(),
+        width: width || (F.getUnitSystem() === "pi-po" ? 132 : 104),
         value: o[key],
         format: F.formatInches,
         parse: F.parseInches,
@@ -6290,7 +6976,8 @@ window.VzContextPanel = VzContextPanel;
 /* ui_kits/bendsim/StatusBar.jsx */
 (function(){
 /* Bottom status bar — live cursor position, tool, zoom, selection.
-   compact (téléphone) : pas de position curseur (aucun survol tactile). */
+   compact (téléphone) : une seule ligne, jamais de retour — pas de curseur
+   (aucun survol tactile), pas de préfixe « Outil : », sélection en ellipse. */
 function VzStatusBar({
   tool,
   cursor,
@@ -6308,17 +6995,63 @@ function VzStatusBar({
     niveau: "Niveau",
     obstacle: "Obstacles"
   };
+  const b = {
+    color: "var(--text-1)",
+    fontWeight: 500
+  };
+  if (compact) {
+    const cellC = {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      padding: "0 10px",
+      borderRight: "1px solid var(--border-subtle)",
+      height: "100%",
+      whiteSpace: "nowrap",
+      flexShrink: 0
+    };
+    return /*#__PURE__*/React.createElement("footer", {
+      style: {
+        height: "var(--statusbar-h)",
+        background: "var(--surface-status)",
+        borderTop: "1px solid var(--border-subtle)",
+        display: "flex",
+        alignItems: "center",
+        font: "var(--text-readout-sm)",
+        color: "var(--text-2)",
+        fontVariantNumeric: "tabular-nums",
+        overflow: "hidden"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: cellC
+    }, /*#__PURE__*/React.createElement("b", {
+      style: b
+    }, toolNames[tool] || tool)), /*#__PURE__*/React.createElement("span", {
+      style: cellC
+    }, /*#__PURE__*/React.createElement("b", {
+      style: b
+    }, Math.round(zoom * 100), " %")), /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "inline-block",
+        flex: 1,
+        minWidth: 0,
+        padding: "0 10px",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        textAlign: "right",
+        lineHeight: "var(--statusbar-h)"
+      }
+    }, selection));
+  }
   const cell = {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
     padding: "0 12px",
     borderRight: "1px solid var(--border-subtle)",
-    height: "100%"
-  };
-  const b = {
-    color: "var(--text-1)",
-    fontWeight: 500
+    height: "100%",
+    whiteSpace: "nowrap"
   };
   return /*#__PURE__*/React.createElement("footer", {
     style: {
@@ -6331,7 +7064,7 @@ function VzStatusBar({
       color: "var(--text-2)",
       fontVariantNumeric: "tabular-nums"
     }
-  }, compact ? null : /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("span", {
     style: {
       ...cell,
       minWidth: 190
@@ -6375,6 +7108,206 @@ const ZOOM_BASE = 8; // 100 % = 8 px per inch (§6, documented)
 const ZOOM_MIN = 0.8; // 10 %
 const ZOOM_MAX = 64; // 800 %
 
+/* ── Draggable bottom sheet (téléphone) ──────────────────────────────────
+   Native-feel context sheet with three snap points (peek · half · full):
+   drag the grabber, release to snap to the nearest; drag below peek to
+   collapse to a pill. Content scrolls inside. Resets to « half » when the
+   selection/bender/mode identity changes so the relevant info surfaces. */
+function VzBottomSheet({
+  identityKey,
+  getMaxHeight,
+  children
+}) {
+  const {
+    Icon
+  } = window.VoltZaBendSimDesignSystem_80ea46;
+  const [snap, setSnap] = React.useState("half"); // peek | half | full
+  const [collapsed, setCollapsed] = React.useState(false);
+  const [dragDy, setDragDy] = React.useState(null); // live px delta while dragging
+  const startY = React.useRef(null);
+  React.useEffect(() => {
+    setSnap("half");
+    setCollapsed(false);
+  }, [identityKey]);
+  const maxH = Math.max(260, getMaxHeight() || 480);
+  const PEEK = 128;
+  const heightFor = s => s === "peek" ? PEEK : s === "full" ? Math.round(maxH * 0.9) : Math.round(maxH * 0.52);
+  const baseH = heightFor(snap);
+  const liveH = dragDy == null ? baseH : Math.min(Math.round(maxH * 0.94), Math.max(70, baseH - dragDy));
+  const onDown = e => {
+    startY.current = e.clientY;
+    setDragDy(0);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch (err) {}
+  };
+  const onMove = e => {
+    if (startY.current == null) return;
+    setDragDy(e.clientY - startY.current);
+  };
+  const onUp = () => {
+    if (startY.current == null) return;
+    const finalH = baseH - (dragDy || 0);
+    startY.current = null;
+    setDragDy(null);
+    if (finalH < PEEK - 24) {
+      setCollapsed(true);
+      return;
+    }
+    const best = ["peek", "half", "full"].map(s => [s, Math.abs(heightFor(s) - finalH)]).sort((a, b) => a[1] - b[1])[0][0];
+    setSnap(best);
+  };
+  if (collapsed) {
+    return /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      "aria-label": "Ouvrir le panneau",
+      onClick: () => setCollapsed(false),
+      style: {
+        position: "absolute",
+        right: "calc(var(--safe-right) + 10px)",
+        bottom: 12,
+        zIndex: 30,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        height: "var(--hit-touch)",
+        padding: "0 14px",
+        font: "600 12px/1 var(--font-ui)",
+        color: "var(--text-1)",
+        background: "var(--surface-overlay)",
+        border: "1px solid var(--border-strong)",
+        borderRadius: "var(--radius-round)",
+        boxShadow: "var(--shadow-2)",
+        cursor: "pointer"
+      }
+    }, /*#__PURE__*/React.createElement(Icon, {
+      name: "chevronDown",
+      size: 14,
+      style: {
+        transform: "rotate(180deg)"
+      }
+    }), "Panneau");
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      bottom: 0,
+      height: liveH,
+      zIndex: 30,
+      display: "flex",
+      flexDirection: "column",
+      borderTop: "1px solid var(--border-strong)",
+      boxShadow: "var(--shadow-3)",
+      borderRadius: "var(--radius-3) var(--radius-3) 0 0",
+      overflow: "hidden",
+      background: "var(--surface-panel)",
+      transition: dragDy == null ? "height var(--motion-panel) var(--ease-out)" : "none",
+      animation: "vz-sheet-in var(--motion-panel) var(--ease-out)"
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `@keyframes vz-sheet-in { from { transform: translateY(14px); opacity: 0.5; } to { transform: none; opacity: 1; } }`), /*#__PURE__*/React.createElement("div", {
+    onPointerDown: onDown,
+    onPointerMove: onMove,
+    onPointerUp: onUp,
+    onPointerCancel: onUp,
+    role: "separator",
+    "aria-label": "Glisser pour redimensionner le panneau",
+    style: {
+      height: 30,
+      flexShrink: 0,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      background: "var(--surface-panel)",
+      borderBottom: "1px solid var(--border-subtle)",
+      cursor: "grab",
+      touchAction: "none"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 40,
+      height: 4,
+      borderRadius: "var(--radius-round)",
+      background: "var(--border-strong)"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minHeight: 0,
+      overflowY: "auto",
+      WebkitOverflowScrolling: "touch"
+    }
+  }, children));
+}
+
+/* ── Floating canvas controls (téléphone) ────────────────────────────────
+   Zoom is pinch-first on phone; these are the button fallback plus the two
+   history commands, parked top-right so they never collide with the bottom
+   sheet or the tool dock. */
+function VzCanvasControls({
+  api,
+  zoomPct
+}) {
+  const {
+    IconButton
+  } = window.VoltZaBendSimDesignSystem_80ea46;
+  const grp = {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    background: "var(--surface-overlay)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-2)",
+    boxShadow: "var(--shadow-2)",
+    overflow: "hidden"
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      top: 10,
+      right: "calc(var(--safe-right) + 10px)",
+      zIndex: 25,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      pointerEvents: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: grp
+  }, /*#__PURE__*/React.createElement(IconButton, {
+    icon: "annuler",
+    label: "Annuler",
+    disabled: !api.canUndo,
+    onClick: api.undo
+  }), /*#__PURE__*/React.createElement(IconButton, {
+    icon: "retablir",
+    label: "R\xE9tablir",
+    disabled: !api.canRedo,
+    onClick: api.redo
+  })), /*#__PURE__*/React.createElement("div", {
+    style: grp
+  }, /*#__PURE__*/React.createElement(IconButton, {
+    icon: "zoomIn",
+    label: "Zoom avant",
+    onClick: () => api.zoomTo(api.cam.z * 1.25)
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      font: "600 10px/1 var(--font-readout)",
+      color: "var(--text-2)",
+      padding: "3px 0",
+      fontVariantNumeric: "tabular-nums"
+    }
+  }, zoomPct, " %"), /*#__PURE__*/React.createElement(IconButton, {
+    icon: "zoomOut",
+    label: "Zoom arri\xE8re",
+    onClick: () => api.zoomTo(api.cam.z / 1.25)
+  }), /*#__PURE__*/React.createElement(IconButton, {
+    icon: "zoomFit",
+    label: "Ajuster \xE0 la vue",
+    onClick: api.fitView
+  })));
+}
 function App() {
   /* ── Document + history ─────────────────────────────────────────── */
   const [history, setHistory] = React.useState(() => {
@@ -6403,6 +7336,18 @@ function App() {
   });
   const [mode, setModeRaw] = React.useState("libre");
   const [obstacleKind, setObstacleKind] = React.useState("cercle");
+  // Unit system for every length readout (po · pi-po · cm). Display only —
+  // the engine stays in decimal inches (§7). Applied to the formatter below
+  // on every render so children format with the current system.
+  const [unit, setUnitState] = React.useState(() => {
+    const saved = E.doc.deserialize(localStorage.getItem(E.doc.STORAGE_KEY) || "");
+    return saved && saved.toggles && saved.toggles.unit ? saved.toggles.unit : "po";
+  });
+  E.format.setUnitSystem(unit);
+  const setUnit = React.useCallback(u => {
+    E.format.setUnitSystem(u);
+    setUnitState(u);
+  }, []);
   // Calculatrice side panel (embedded VoltZa bend calculator). Mounted on
   // first open, then kept alive (display:none) so typed values survive a
   // toggle; OFF by default — the canvas stays sovereign.
@@ -6442,7 +7387,6 @@ function App() {
       window.removeEventListener("resize", onResize);
     };
   }, []);
-  const [sheetCollapsed, setSheetCollapsed] = React.useState(false);
 
   /* ── Défis / Score ──────────────────────────────────────────────── */
   const [defiIndex, setDefiIndex] = React.useState(0);
@@ -6490,12 +7434,13 @@ function App() {
         localStorage.setItem(E.doc.STORAGE_KEY, E.doc.serialize(doc, cam, {
           grid,
           snap,
-          calc: calcOpen
+          calc: calcOpen,
+          unit
         }));
       } catch (e) {/* stockage plein — silencieux */}
     }, 300);
     return () => clearTimeout(t);
-  }, [doc, cam, grid, snap, calcOpen]);
+  }, [doc, cam, grid, snap, calcOpen, unit]);
 
   /* ── Collision — memoized on the document (§4) ──────────────────── */
   const collision = React.useMemo(() => E.collision.evaluate(doc), [doc]);
@@ -6741,13 +7686,11 @@ function App() {
       return mk ? "Marque à " + E.format.formatInchesUnit(mk.s) : "Aucune sélection";
     }
     return "Aucune sélection";
-  }, [doc]);
+  }, [doc, unit]); // unit: readouts reformat when the unit system toggles
 
-  /* Bottom sheet (compact) pops back open when the context changes. */
+  /* Bottom sheet (compact) resets to « half » when the context changes —
+     the VzBottomSheet owns snap/collapse state, keyed by this identity. */
   const sheetIdentity = (doc.bender ? "b:" + doc.bender.conduitId : "") + "|" + (doc.selection ? doc.selection.kind + ":" + doc.selection.id : "") + "|" + mode;
-  React.useEffect(() => {
-    setSheetCollapsed(false);
-  }, [sheetIdentity]);
   const sheetRelevant = !!(doc.bender || doc.selection || mode !== "libre");
 
   /* ── API bundle handed to children ──────────────────────────────── */
@@ -6800,7 +7743,12 @@ function App() {
     style: {
       display: "flex",
       flexDirection: "column",
-      height: "100%"
+      height: "100%",
+      // compact : cibles tactiles 44px (Apple HIG — IconButton/NumberField
+      // consomment --hit-min via leurs styles) — le bureau garde 32px
+      ...(compact ? {
+        "--hit-min": "44px"
+      } : {})
     }
   }, /*#__PURE__*/React.createElement(window.VzToolbar, {
     mode: mode,
@@ -6821,6 +7769,8 @@ function App() {
     onNewConduit: newConduit,
     calcOpen: calcOpen,
     onToggleCalc: toggleCalc,
+    unit: unit,
+    setUnit: setUnit,
     compact: compact
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6829,14 +7779,14 @@ function App() {
       minHeight: 0,
       position: "relative"
     }
-  }, /*#__PURE__*/React.createElement(window.VzToolPalette, {
+  }, !compact ? /*#__PURE__*/React.createElement(window.VzToolPalette, {
     tool: tool,
     setTool: setTool,
     rebutEnabled: !!doc.selection,
     onRebut: rebut,
     obstacleKind: obstacleKind,
     setObstacleKind: setObstacleKind
-  }), calcMounted ? /*#__PURE__*/React.createElement("aside", {
+  }) : null, calcMounted ? /*#__PURE__*/React.createElement("aside", {
     "aria-label": "Calculatrice de cintrage",
     style: compact ? {
       position: "absolute",
@@ -6885,70 +7835,16 @@ function App() {
     src: "../../calculatrice/calculatrice.html"
   }))) : null, /*#__PURE__*/React.createElement(window.VzCanvas, {
     api: api
-  }), !compact ? panel : sheetRelevant && !sheetCollapsed ? /*#__PURE__*/React.createElement("div", {
+  }), compact ? /*#__PURE__*/React.createElement(VzCanvasControls, {
+    api: api,
+    zoomPct: Math.round(cam.z / ZOOM_BASE * 100)
+  }) : null, !compact ? panel : sheetRelevant ? /*#__PURE__*/React.createElement(VzBottomSheet, {
+    identityKey: sheetIdentity,
+    getMaxHeight: () => viewport.current.h
+  }, panel) : null, /*#__PURE__*/React.createElement("div", {
     style: {
       position: "absolute",
-      left: 0,
-      right: 0,
-      bottom: 0,
-      maxHeight: "58%",
-      zIndex: 30,
-      display: "flex",
-      flexDirection: "column",
-      borderTop: "1px solid var(--border-strong)",
-      boxShadow: "var(--shadow-3)"
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    "aria-label": "R\xE9duire le panneau",
-    onClick: () => setSheetCollapsed(true),
-    style: {
-      height: 26,
-      flexShrink: 0,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      background: "var(--surface-panel)",
-      color: "var(--text-2)",
-      border: "none",
-      borderBottom: "1px solid var(--border-subtle)",
-      cursor: "pointer"
-    }
-  }, /*#__PURE__*/React.createElement(window.VoltZaBendSimDesignSystem_80ea46.Icon, {
-    name: "chevronDown",
-    size: 15
-  })), panel) : sheetRelevant ? /*#__PURE__*/React.createElement("button", {
-    type: "button",
-    "aria-label": "Ouvrir le panneau",
-    onClick: () => setSheetCollapsed(false),
-    style: {
-      position: "absolute",
-      right: 10,
-      bottom: 12,
-      zIndex: 30,
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 6,
-      height: 32,
-      padding: "0 12px",
-      font: "600 12px/1 var(--font-ui)",
-      color: "var(--text-1)",
-      background: "var(--surface-overlay)",
-      border: "1px solid var(--border-strong)",
-      borderRadius: "var(--radius-round)",
-      boxShadow: "var(--shadow-2)",
-      cursor: "pointer"
-    }
-  }, /*#__PURE__*/React.createElement(window.VoltZaBendSimDesignSystem_80ea46.Icon, {
-    name: "chevronDown",
-    size: 14,
-    style: {
-      transform: "rotate(180deg)"
-    }
-  }), "Panneau") : null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      position: "absolute",
-      left: "var(--palette-w)",
+      left: compact ? 0 : "var(--palette-w)",
       right: compact ? 0 : "var(--panel-w)",
       bottom: 14,
       zIndex: 45,
@@ -6979,7 +7875,14 @@ function App() {
     confirmLabel: "Mettre au rebut",
     onConfirm: confirmRebut,
     onCancel: () => setDialog(null)
-  }, "L'objet s\xE9lectionn\xE9 sera supprim\xE9 du plan de travail. Cette action est annulable (Ctrl+Z).")), /*#__PURE__*/React.createElement(window.VzStatusBar, {
+  }, "L'objet s\xE9lectionn\xE9 sera supprim\xE9 du plan de travail. Cette action est annulable (Ctrl+Z).")), compact ? /*#__PURE__*/React.createElement(window.VzToolDock, {
+    tool: tool,
+    setTool: setTool,
+    rebutEnabled: !!doc.selection,
+    onRebut: rebut,
+    obstacleKind: obstacleKind,
+    setObstacleKind: setObstacleKind
+  }) : /*#__PURE__*/React.createElement(window.VzStatusBar, {
     tool: tool,
     cursor: cursor,
     zoom: cam.z / ZOOM_BASE,
