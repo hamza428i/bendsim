@@ -1,5 +1,5 @@
 /* VoltZa Bend Sim — service worker (cache-first, hors ligne) */
-var CACHE = "voltza-bendsim-dcdfb2014a";
+var CACHE = "voltza-bendsim-eff11d2696";
 var ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 self.addEventListener("install", function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) {

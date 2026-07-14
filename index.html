@@ -7616,11 +7616,18 @@ function App() {
   /* ── Tool switch clears tool-scoped overlays (§3) ───────────────── */
   const setTool = React.useCallback(t => {
     setToolRaw(prev => {
+      if (prev === t) return t; // re-tapping the active tool: no-op
       if (prev === "ruban") setMeasures([]);
       if (prev === "niveau") setLevels([]);
-      if (prev === "cintreuse" && t !== "cintreuse") {
-        setHistory(h => E.doc.replace(h, E.doc.disengageBender(h.present).doc));
-      }
+      // Picking a tool exits the current selection so the context sheet
+      // (compact) closes and frees the canvas for the new tool. Leaving the
+      // cintreuse also disengages the bender.
+      setHistory(h => {
+        let d = h.present;
+        if (prev === "cintreuse") d = E.doc.disengageBender(d).doc;
+        if (d.selection) d = E.doc.select(d, null).doc;
+        return E.doc.replace(h, d);
+      });
       return t;
     });
   }, []);
