@@ -3634,16 +3634,34 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
 
   /* ── Persistence (§8) — document + camera to localStorage ───────────── */
   var STORAGE_KEY = "voltza-bendsim-v1";
+  /* Soft session reset: if the last save is older than this, the app starts
+     on a fresh canvas instead of restoring a possibly-stale/corrupt plan
+     (préférences conservées, plan précédent archivé — voir app.jsx). */
+  var STALE_MS = 4 * 60 * 60 * 1000; // 4 h d'inactivité
+
+  function nowMs() { return (typeof Date !== "undefined" && Date.now) ? Date.now() : 0; }
 
   function serialize(doc, camera, toggles) {
-    return JSON.stringify({ v: 1, doc: doc, camera: camera, toggles: toggles });
+    return JSON.stringify({ v: 1, savedAt: nowMs(), doc: doc, camera: camera, toggles: toggles });
   }
+  /* Returns the parsed session, or null when absent / unparseable / the wrong
+     version / structurally corrupt. A null result means « start fresh » — the
+     load-time guard against a save that would otherwise crash the app. */
   function deserialize(text) {
     try {
       var data = JSON.parse(text);
       if (!data || data.v !== 1 || !data.doc) return null;
+      var d = data.doc;
+      // Shape guard — the fields every reducer/renderer assumes must exist.
+      if (!Array.isArray(d.conduits) || !Array.isArray(d.obstacles)) return null;
       return data;
     } catch (e) { return null; }
+  }
+
+  /* Stale = no timestamp (pre-timestamp save) or older than STALE_MS. */
+  function isStale(savedAt, now) {
+    if (typeof savedAt !== "number") return true;
+    return (now - savedAt) > STALE_MS;
   }
 
   var api = {
@@ -3671,8 +3689,10 @@ __ds_ns.SegmentedControl = __ds_scope.SegmentedControl;
     undo: undo,
     redo: redo,
     STORAGE_KEY: STORAGE_KEY,
+    STALE_MS: STALE_MS,
     serialize: serialize,
     deserialize: deserialize,
+    isStale: isStale,
   };
 
   global.VZEngine = global.VZEngine || {};
@@ -3985,6 +4005,8 @@ function VzCalcToggle({
 function VzOverflowMenu({
   open,
   onClose,
+  mode,
+  setMode,
   grid,
   setGrid,
   snap,
@@ -4004,6 +4026,32 @@ function VzOverflowMenu({
   const unitOpts = window.VZEngine.format.UNIT_SYSTEMS.map(u => ({
     value: u.id,
     label: u.label
+  }));
+  const RowGroup = ({
+    label,
+    value,
+    onChange,
+    options
+  }) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10,
+      padding: "6px 10px 8px"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      font: "var(--text-label-sm)",
+      letterSpacing: "var(--tracking-label)",
+      textTransform: "uppercase",
+      color: "var(--text-2)"
+    }
+  }, label), /*#__PURE__*/React.createElement(SegmentedControl, {
+    ariaLabel: label,
+    value: value,
+    onChange: onChange,
+    options: options
   }));
   const Row = ({
     icon,
@@ -4073,27 +4121,26 @@ function VzOverflowMenu({
       flexDirection: "column",
       gap: 2
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 10,
-      padding: "6px 10px 8px"
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      font: "var(--text-label-sm)",
-      letterSpacing: "var(--tracking-label)",
-      textTransform: "uppercase",
-      color: "var(--text-2)"
-    }
-  }, "Unit\xE9s"), /*#__PURE__*/React.createElement(SegmentedControl, {
-    ariaLabel: "Unit\xE9s",
+  }, /*#__PURE__*/React.createElement(RowGroup, {
+    label: "Mode",
+    value: mode,
+    onChange: setMode,
+    options: [{
+      value: "libre",
+      label: "Libre"
+    }, {
+      value: "defis",
+      label: "Défis"
+    }, {
+      value: "score",
+      label: "Score"
+    }]
+  }), /*#__PURE__*/React.createElement(RowGroup, {
+    label: "Unit\xE9s",
     value: unit,
     onChange: setUnit,
     options: unitOpts
-  })), /*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       height: 1,
       background: "var(--border-subtle)",
@@ -4252,32 +4299,16 @@ function VzToolbar({
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
-        font: "700 17px/1 var(--font-ui)",
+        font: "700 18px/1 var(--font-ui)",
         color: "var(--text-1)",
         flexShrink: 0
       }
     }, "VoltZa"), /*#__PURE__*/React.createElement("div", {
       style: {
         flex: 1,
-        minWidth: 0,
-        display: "flex",
-        justifyContent: "center"
+        minWidth: 0
       }
-    }, /*#__PURE__*/React.createElement(SegmentedControl, {
-      ariaLabel: "Mode",
-      value: mode,
-      onChange: setMode,
-      options: [{
-        value: "libre",
-        label: "Libre"
-      }, {
-        value: "defis",
-        label: "Défis"
-      }, {
-        value: "score",
-        label: "Score"
-      }]
-    })), /*#__PURE__*/React.createElement("div", {
+    }), /*#__PURE__*/React.createElement("div", {
       style: {
         position: "relative",
         flexShrink: 0
@@ -4290,7 +4321,7 @@ function VzToolbar({
         setOverflow(false);
       },
       "aria-label": "Nouveau conduit"
-    }), flyout ? /*#__PURE__*/React.createElement("div", {
+    }, "Nouveau"), flyout ? /*#__PURE__*/React.createElement("div", {
       role: "menu",
       style: {
         position: "fixed",
@@ -4350,6 +4381,8 @@ function VzToolbar({
     }) : null, /*#__PURE__*/React.createElement(VzOverflowMenu, {
       open: overflow,
       onClose: () => setOverflow(false),
+      mode: mode,
+      setMode: setMode,
       grid: grid,
       setGrid: setGrid,
       snap: snap,
@@ -4730,8 +4763,6 @@ window.VzToolPalette = VzToolPalette;
 function VzToolDock({
   tool,
   setTool,
-  rebutEnabled,
-  onRebut,
   obstacleKind,
   setObstacleKind
 }) {
@@ -4739,7 +4770,9 @@ function VzToolDock({
     Icon
   } = window.VoltZaBendSimDesignSystem_80ea46;
   const [shapes, setShapes] = React.useState(false);
-  const tools = [["select", "Sélection", "select"], ["ruban", "Ruban", "ruban"], ["marqueur", "Marqueur", "marqueur"], ["coupe", "Coupe", "coupe"], ["cintreuse", "Cintreuse", "cintreuse"], ["niveau", "Niveau", "niveau"], ["obstacle", "Obstacles", "obstacle"]];
+  // Seven tools, evenly filling the width — no horizontal scroll. Rebut lives
+  // in the context sheet (Supprimer), so it isn't crowded in here.
+  const tools = [["select", "Choisir", "select"], ["ruban", "Ruban", "ruban"], ["marqueur", "Marque", "marqueur"], ["coupe", "Coupe", "coupe"], ["cintreuse", "Cintreuse", "cintreuse"], ["niveau", "Niveau", "niveau"], ["obstacle", "Obstacle", "obstacle"]];
   const shapeDefs = [["cercle", "Cercle", /*#__PURE__*/React.createElement("circle", {
     key: "c",
     cx: "12",
@@ -4761,31 +4794,27 @@ function VzToolDock({
     label,
     icon,
     active,
-    danger,
-    disabled,
     onClick
   }) => /*#__PURE__*/React.createElement("button", {
     type: "button",
     "aria-label": label,
     "aria-pressed": active,
-    disabled: disabled,
     onClick: onClick,
     style: {
       position: "relative",
-      flex: "0 0 auto",
+      flex: "1 1 0",
+      minWidth: 0,
       display: "inline-flex",
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
       gap: 3,
-      minWidth: 58,
       height: "var(--dock-h)",
-      padding: "0 6px",
+      padding: "0 2px",
       background: "transparent",
       border: "none",
-      cursor: disabled ? "default" : "pointer",
-      color: disabled ? "var(--text-3)" : danger ? "var(--danger)" : active ? "var(--accent)" : "var(--text-2)",
-      opacity: disabled ? 0.4 : 1,
+      cursor: "pointer",
+      color: active ? "var(--accent)" : "var(--text-2)",
       WebkitTapHighlightColor: "transparent",
       touchAction: "manipulation"
     }
@@ -4793,20 +4822,23 @@ function VzToolDock({
     style: {
       position: "absolute",
       top: 0,
-      left: 12,
-      right: 12,
+      left: "22%",
+      right: "22%",
       height: 2,
       background: "var(--accent)",
       borderRadius: 1
     }
   }) : null, /*#__PURE__*/React.createElement(Icon, {
     name: icon,
-    size: 22
+    size: 23
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       font: "600 10px/1 var(--font-ui)",
       letterSpacing: "0.01em",
-      whiteSpace: "nowrap"
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      maxWidth: "100%"
     }
   }, label));
   return /*#__PURE__*/React.createElement("nav", {
@@ -4881,12 +4913,7 @@ function VzToolDock({
   }, glyph), label)))) : null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      alignItems: "stretch",
-      justifyContent: "space-between",
-      overflowX: "auto",
-      overflowY: "hidden",
-      WebkitOverflowScrolling: "touch",
-      scrollbarWidth: "none"
+      alignItems: "stretch"
     }
   }, tools.map(([id, label, icon]) => /*#__PURE__*/React.createElement(Cell, {
     key: id,
@@ -4898,22 +4925,7 @@ function VzToolDock({
       if (id === "obstacle") setShapes(tool === "obstacle" ? s => !s : true);else setShapes(false);
       setTool(id);
     }
-  })), /*#__PURE__*/React.createElement("span", {
-    style: {
-      width: 1,
-      alignSelf: "center",
-      height: 30,
-      background: "var(--border-subtle)",
-      flexShrink: 0
-    }
-  }), /*#__PURE__*/React.createElement(Cell, {
-    id: "rebut",
-    label: "Rebut",
-    icon: "rebut",
-    danger: true,
-    disabled: !rebutEnabled,
-    onClick: onRebut
-  })));
+  }))));
 }
 window.VzToolDock = VzToolDock;
 })();
@@ -5225,9 +5237,26 @@ function VzCanvas({
     } = evtWorld(e);
     capture(e);
 
-    // compact: tap tools fire on pointerUP (below); a bender already engaged
-    // on the touched conduit still slides immediately
-    if (api.compact && ["marqueur", "coupe", "niveau", "obstacle", "cintreuse"].includes(tool)) {
+    // ── Phone: one simple, predictable single-finger model ────────────
+    // tap = act/select · drag = pan · (ruban draws, engaged bender slides,
+    // a drag on the already-selected object moves it). Two fingers pinch.
+    if (api.compact) {
+      if (tool === "ruban") {
+        const a = snapFree(world);
+        setSnapHit(a.label ? {
+          world: a.point,
+          label: a.label
+        } : null);
+        drag.current = {
+          kind: "measure",
+          a: a.point
+        };
+        setLiveMeasure({
+          a: a.point,
+          b: a.point
+        });
+        return;
+      }
       if (tool === "cintreuse" && doc.bender) {
         const ch = hitConduit(world, 1.5);
         if (ch && ch.conduit.id === doc.bender.conduitId) {
@@ -5238,11 +5267,51 @@ function VzCanvas({
           return;
         }
       }
+      if (tool === "select" && doc.selection) {
+        const sel = doc.selection;
+        if (sel.kind === "conduit") {
+          const ch = hitConduit(world, 1);
+          if (ch && ch.conduit.id === sel.id) {
+            api.beginDrag();
+            drag.current = {
+              kind: "conduit",
+              id: sel.id,
+              start: world,
+              p0: {
+                x: ch.conduit.pose.x,
+                y: ch.conduit.pose.y
+              },
+              moved: false,
+              doc
+            };
+            return;
+          }
+        } else if (sel.kind === "obstacle") {
+          const ob = hitObstacle(world);
+          if (ob && ob.id === sel.id) {
+            api.beginDrag();
+            drag.current = {
+              kind: "obstacle",
+              id: sel.id,
+              start: world,
+              o0: {
+                x: ob.x,
+                y: ob.y
+              },
+              moved: false,
+              doc
+            };
+            return;
+          }
+        }
+      }
+      // default: tap (acts on lift) or drag (pans the canvas)
       drag.current = {
-        kind: "tap",
+        kind: "tappan",
         world,
         px: e.clientX,
         py: e.clientY,
+        cam0: cam,
         moved: false
       };
       return;
@@ -5360,8 +5429,17 @@ function VzCanvas({
       }
       return;
     }
-    if (d && d.kind === "tap") {
-      if (Math.hypot(e.clientX - d.px, e.clientY - d.py) > 10) d.moved = true;
+    if (d && d.kind === "tappan") {
+      if (!d.moved && Math.hypot(e.clientX - d.px, e.clientY - d.py) > 8) d.moved = true;
+      if (d.moved) {
+        const dx = (e.clientX - d.px) / d.cam0.z,
+          dy = (e.clientY - d.py) / d.cam0.z;
+        api.setCam({
+          x: d.cam0.x - dx,
+          y: d.cam0.y + dy,
+          z: d.cam0.z
+        });
+      }
       return;
     }
     if (d && d.kind === "pan") {
@@ -5485,7 +5563,38 @@ function VzCanvas({
       setLiveMeasure(null);
       if (EC.geom.dist(m.a, m.b) > 0.25) api.setMeasures(ms => [...ms, m]);
     }
-    if (d.kind === "tap" && !d.moved) toolTapAction(d.world, false);
+    if (d.kind === "tappan" && !d.moved) {
+      if (tool === "select") {
+        const mk = hitMark(d.world);
+        if (mk) {
+          api.replace(EC.doc.select(doc, {
+            kind: "mark",
+            id: mk.mark.id,
+            conduitId: mk.conduit.id
+          }).doc);
+          return;
+        }
+        const ob = hitObstacle(d.world);
+        if (ob) {
+          api.replace(EC.doc.select(doc, {
+            kind: "obstacle",
+            id: ob.id
+          }).doc);
+          return;
+        }
+        const ch = hitConduit(d.world, 1);
+        if (ch) {
+          api.replace(EC.doc.select(doc, {
+            kind: "conduit",
+            id: ch.conduit.id
+          }).doc);
+          return;
+        }
+        api.replace(EC.doc.select(doc, null).doc);
+        return;
+      }
+      toolTapAction(d.world, false);
+    }
   }
   function onPointerCancel(e) {
     pointers.current.delete(e.pointerId);
@@ -7107,12 +7216,51 @@ const E = window.VZEngine;
 const ZOOM_BASE = 8; // 100 % = 8 px per inch (§6, documented)
 const ZOOM_MIN = 0.8; // 10 %
 const ZOOM_MAX = 64; // 800 %
+const DEFAULT_CAM = {
+  x: -10,
+  y: 55,
+  z: ZOOM_BASE
+};
 
-/* ── Draggable bottom sheet (téléphone) ──────────────────────────────────
-   Native-feel context sheet with three snap points (peek · half · full):
-   drag the grabber, release to snap to the nearest; drag below peek to
-   collapse to a pill. Content scrolls inside. Resets to « half » when the
-   selection/bender/mode identity changes so the relevant info surfaces. */
+/* ── Session boot (§8) ───────────────────────────────────────────────────
+   One place decides restore vs. fresh, so a stale or corrupt save can never
+   silently poison a session. Read once at startup:
+   • no/invalid save  → fresh canvas (silent).
+   • save older than STALE_MS → « soft reset »: fresh canvas, preferences
+     kept (unités/grille/aimant/calc), previous plan archived + offered back.
+   • recent save      → restore exactly as before. */
+function loadBoot() {
+  let raw = "";
+  try {
+    raw = localStorage.getItem(E.doc.STORAGE_KEY) || "";
+  } catch (e) {/* accès stockage bloqué */}
+  const saved = E.doc.deserialize(raw);
+  const toggles = saved && saved.toggles || {};
+  const hadWork = !!(saved && saved.doc && (saved.doc.conduits.length || saved.doc.obstacles.length));
+  const stale = !!saved && E.doc.isStale(saved.savedAt, Date.now());
+  if (!saved || stale) {
+    return {
+      doc: E.doc.emptyDoc(),
+      cam: DEFAULT_CAM,
+      toggles,
+      reset: stale && hadWork,
+      // show the restore offer only if there was work
+      archivedRaw: stale ? raw : "" // keep the stale plan recoverable
+    };
+  }
+  return {
+    doc: saved.doc,
+    cam: saved.camera || DEFAULT_CAM,
+    toggles,
+    reset: false,
+    archivedRaw: ""
+  };
+}
+
+/* ── Bottom sheet (téléphone) — simple & robust ──────────────────────────
+   Two states only: open (sizes to content, capped, scrolls) or collapsed to
+   a pill. Tap the header to collapse, tap the pill to reopen — no drag math,
+   nothing to fight the inner scroll. Reopens when the context changes. */
 function VzBottomSheet({
   identityKey,
   getMaxHeight,
@@ -7121,47 +7269,17 @@ function VzBottomSheet({
   const {
     Icon
   } = window.VoltZaBendSimDesignSystem_80ea46;
-  const [snap, setSnap] = React.useState("half"); // peek | half | full
-  const [collapsed, setCollapsed] = React.useState(false);
-  const [dragDy, setDragDy] = React.useState(null); // live px delta while dragging
-  const startY = React.useRef(null);
+  const [open, setOpen] = React.useState(true);
   React.useEffect(() => {
-    setSnap("half");
-    setCollapsed(false);
+    setOpen(true);
   }, [identityKey]);
   const maxH = Math.max(260, getMaxHeight() || 480);
-  const PEEK = 128;
-  const heightFor = s => s === "peek" ? PEEK : s === "full" ? Math.round(maxH * 0.9) : Math.round(maxH * 0.52);
-  const baseH = heightFor(snap);
-  const liveH = dragDy == null ? baseH : Math.min(Math.round(maxH * 0.94), Math.max(70, baseH - dragDy));
-  const onDown = e => {
-    startY.current = e.clientY;
-    setDragDy(0);
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch (err) {}
-  };
-  const onMove = e => {
-    if (startY.current == null) return;
-    setDragDy(e.clientY - startY.current);
-  };
-  const onUp = () => {
-    if (startY.current == null) return;
-    const finalH = baseH - (dragDy || 0);
-    startY.current = null;
-    setDragDy(null);
-    if (finalH < PEEK - 24) {
-      setCollapsed(true);
-      return;
-    }
-    const best = ["peek", "half", "full"].map(s => [s, Math.abs(heightFor(s) - finalH)]).sort((a, b) => a[1] - b[1])[0][0];
-    setSnap(best);
-  };
-  if (collapsed) {
+  const capH = Math.round(maxH * 0.6);
+  if (!open) {
     return /*#__PURE__*/React.createElement("button", {
       type: "button",
       "aria-label": "Ouvrir le panneau",
-      onClick: () => setCollapsed(false),
+      onClick: () => setOpen(true),
       style: {
         position: "absolute",
         right: "calc(var(--safe-right) + 10px)",
@@ -7171,8 +7289,8 @@ function VzBottomSheet({
         alignItems: "center",
         gap: 6,
         height: "var(--hit-touch)",
-        padding: "0 14px",
-        font: "600 12px/1 var(--font-ui)",
+        padding: "0 16px",
+        font: "600 13px/1 var(--font-ui)",
         color: "var(--text-1)",
         background: "var(--surface-overlay)",
         border: "1px solid var(--border-strong)",
@@ -7182,11 +7300,11 @@ function VzBottomSheet({
       }
     }, /*#__PURE__*/React.createElement(Icon, {
       name: "chevronDown",
-      size: 14,
+      size: 16,
       style: {
         transform: "rotate(180deg)"
       }
-    }), "Panneau");
+    }), "D\xE9tails");
   }
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7194,7 +7312,7 @@ function VzBottomSheet({
       left: 0,
       right: 0,
       bottom: 0,
-      height: liveH,
+      maxHeight: capH,
       zIndex: 30,
       display: "flex",
       flexDirection: "column",
@@ -7203,26 +7321,23 @@ function VzBottomSheet({
       borderRadius: "var(--radius-3) var(--radius-3) 0 0",
       overflow: "hidden",
       background: "var(--surface-panel)",
-      transition: dragDy == null ? "height var(--motion-panel) var(--ease-out)" : "none",
       animation: "vz-sheet-in var(--motion-panel) var(--ease-out)"
     }
-  }, /*#__PURE__*/React.createElement("style", null, `@keyframes vz-sheet-in { from { transform: translateY(14px); opacity: 0.5; } to { transform: none; opacity: 1; } }`), /*#__PURE__*/React.createElement("div", {
-    onPointerDown: onDown,
-    onPointerMove: onMove,
-    onPointerUp: onUp,
-    onPointerCancel: onUp,
-    role: "separator",
-    "aria-label": "Glisser pour redimensionner le panneau",
+  }, /*#__PURE__*/React.createElement("style", null, `@keyframes vz-sheet-in { from { transform: translateY(16px); opacity: 0.4; } to { transform: none; opacity: 1; } }`), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => setOpen(false),
+    "aria-label": "R\xE9duire le panneau",
     style: {
-      height: 30,
+      height: 34,
       flexShrink: 0,
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
+      gap: 6,
       background: "var(--surface-panel)",
+      border: "none",
       borderBottom: "1px solid var(--border-subtle)",
-      cursor: "grab",
-      touchAction: "none"
+      cursor: "pointer"
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -7309,40 +7424,29 @@ function VzCanvasControls({
   })));
 }
 function App() {
+  /* ── Session boot — read once, decides restore vs. fresh (§8) ────── */
+  const bootRef = React.useRef(null);
+  if (!bootRef.current) bootRef.current = loadBoot();
+  const boot = bootRef.current;
+
   /* ── Document + history ─────────────────────────────────────────── */
-  const [history, setHistory] = React.useState(() => {
-    const saved = E.doc.deserialize(localStorage.getItem(E.doc.STORAGE_KEY) || "");
-    return E.doc.newHistory(saved ? saved.doc : E.doc.emptyDoc());
-  });
+  const [history, setHistory] = React.useState(() => E.doc.newHistory(boot.doc));
   const doc = history.present;
 
   /* ── Camera, toggles, tool, mode ────────────────────────────────── */
-  const [cam, setCam] = React.useState(() => {
-    const saved = E.doc.deserialize(localStorage.getItem(E.doc.STORAGE_KEY) || "");
-    return saved && saved.camera ? saved.camera : {
-      x: -10,
-      y: 55,
-      z: ZOOM_BASE
-    };
-  });
+  const [cam, setCam] = React.useState(boot.cam);
   const [tool, setToolRaw] = React.useState("select");
-  const [grid, setGrid] = React.useState(() => {
-    const saved = E.doc.deserialize(localStorage.getItem(E.doc.STORAGE_KEY) || "");
-    return saved && saved.toggles ? saved.toggles.grid !== false : true;
-  });
-  const [snap, setSnap] = React.useState(() => {
-    const saved = E.doc.deserialize(localStorage.getItem(E.doc.STORAGE_KEY) || "");
-    return saved && saved.toggles ? saved.toggles.snap !== false : true;
-  });
+  const [grid, setGrid] = React.useState(boot.toggles.grid !== false);
+  const [snap, setSnap] = React.useState(boot.toggles.snap !== false);
   const [mode, setModeRaw] = React.useState("libre");
   const [obstacleKind, setObstacleKind] = React.useState("cercle");
+  // Restore offer after a soft reset — a dismissible pill, not an auto-toast,
+  // so the archived plan stays one tap away without blocking the fresh canvas.
+  const [recover, setRecover] = React.useState(boot.reset);
   // Unit system for every length readout (po · pi-po · cm). Display only —
   // the engine stays in decimal inches (§7). Applied to the formatter below
   // on every render so children format with the current system.
-  const [unit, setUnitState] = React.useState(() => {
-    const saved = E.doc.deserialize(localStorage.getItem(E.doc.STORAGE_KEY) || "");
-    return saved && saved.toggles && saved.toggles.unit ? saved.toggles.unit : "po";
-  });
+  const [unit, setUnitState] = React.useState(boot.toggles.unit || "po");
   E.format.setUnitSystem(unit);
   const setUnit = React.useCallback(u => {
     E.format.setUnitSystem(u);
@@ -7402,8 +7506,31 @@ function App() {
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3000);
   }, []);
 
+  /* ── Soft-reset recovery (§8) ───────────────────────────────────────
+     On a stale-session start, archive the previous plan once and let the
+     operator pull it back. The offer clears the moment real work begins. */
+  React.useEffect(() => {
+    if (boot.archivedRaw) {
+      try {
+        localStorage.setItem(E.doc.STORAGE_KEY + ".archive", boot.archivedRaw);
+      } catch (e) {/* stockage plein */}
+    }
+  }, []);
+  const restorePrev = React.useCallback(() => {
+    const saved = E.doc.deserialize(boot.archivedRaw);
+    setRecover(false);
+    if (!saved) {
+      toast("info", "Plan précédent indisponible");
+      return;
+    }
+    setHistory(E.doc.newHistory(saved.doc));
+    if (saved.camera) setCam(saved.camera);
+    toast("success", "Plan précédent restauré");
+  }, [toast]);
+
   /* commit = undoable mutation; replace = transient (bender slide, drags) */
   const commit = React.useCallback(next => {
+    setRecover(false); // starting work dismisses the restore offer
     setHistory(h => E.doc.commit(h, next));
   }, []);
   const replace = React.useCallback(next => {
@@ -7841,7 +7968,59 @@ function App() {
   }) : null, !compact ? panel : sheetRelevant ? /*#__PURE__*/React.createElement(VzBottomSheet, {
     identityKey: sheetIdentity,
     getMaxHeight: () => viewport.current.h
-  }, panel) : null, /*#__PURE__*/React.createElement("div", {
+  }, panel) : null, recover ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "absolute",
+      left: 0,
+      right: 0,
+      bottom: compact ? 12 : 44,
+      zIndex: 46,
+      display: "flex",
+      justifyContent: "center",
+      pointerEvents: "none",
+      padding: "0 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      pointerEvents: "auto",
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      maxWidth: "100%",
+      padding: "6px 6px 6px 14px",
+      background: "var(--surface-overlay)",
+      border: "1px solid var(--border-strong)",
+      borderRadius: "var(--radius-round)",
+      boxShadow: "var(--shadow-2)"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      font: "var(--text-body)",
+      color: "var(--text-1)",
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      textOverflow: "ellipsis"
+    }
+  }, "Nouvelle session \xB7 plan pr\xE9c\xE9dent archiv\xE9"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: restorePrev,
+    style: {
+      flexShrink: 0,
+      height: 32,
+      padding: "0 12px",
+      marginLeft: 4,
+      font: "600 12px/1 var(--font-ui)",
+      color: "var(--accent)",
+      background: "var(--accent-dim)",
+      border: "none",
+      borderRadius: "var(--radius-round)",
+      cursor: "pointer"
+    }
+  }, "Restaurer"), /*#__PURE__*/React.createElement(IconButton, {
+    icon: "x",
+    label: "Ignorer",
+    onClick: () => setRecover(false)
+  }))) : null, /*#__PURE__*/React.createElement("div", {
     style: {
       position: "absolute",
       left: compact ? 0 : "var(--palette-w)",
@@ -7878,8 +8057,6 @@ function App() {
   }, "L'objet s\xE9lectionn\xE9 sera supprim\xE9 du plan de travail. Cette action est annulable (Ctrl+Z).")), compact ? /*#__PURE__*/React.createElement(window.VzToolDock, {
     tool: tool,
     setTool: setTool,
-    rebutEnabled: !!doc.selection,
-    onRebut: rebut,
     obstacleKind: obstacleKind,
     setObstacleKind: setObstacleKind
   }) : /*#__PURE__*/React.createElement(window.VzStatusBar, {
